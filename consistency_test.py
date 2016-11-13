@@ -56,6 +56,8 @@ class TestHelper(Tester):
             ConsistencyLevel.SERIAL: sum(rf_factors) / 2 + 1,
             ConsistencyLevel.LOCAL_SERIAL: rf_factors[dc] / 2 + 1,
             ConsistencyLevel.LOCAL_ONE: 1,
+            ConsistencyLevel.QUORUM_PLUS_LOCAL_ONE: sum(rf_factors) / 2 + 1,
+            ConsistencyLevel.QUORUM_PLUS_LOCAL_QUORUM: sum(rf_factors) / 2 + 1,
         }[cl]
 
     def get_expected_consistency(self, idx, rf_factors, write_cl, read_cl):
@@ -98,6 +100,12 @@ class TestHelper(Tester):
         """
         if self._is_local(cl):
             return num_nodes_alive[current] >= self._required_nodes(cl, rf_factors, current)
+        elif cl == ConsistencyLevel.QUORUM_PLUS_LOCAL_ONE:
+            return ( sum(num_nodes_alive) >= self._required_nodes(cl, rf_factors, current) and
+                     num_nodes_alive[current] >= self._required_nodes(ConsistencyLevel.LOCAL_ONE, rf_factors, current) )
+        elif cl == ConsistencyLevel.QUORUM_PLUS_LOCAL_QUORUM:
+            return (sum(num_nodes_alive) >= self._required_nodes(ConsistencyLevel.QUORUM, rf_factors, current) and
+                    num_nodes_alive[current] >= self._required_nodes(ConsistencyLevel.LOCAL_QUORUM, rf_factors, current))
         elif cl == ConsistencyLevel.EACH_QUORUM:
             for i in xrange(0, len(rf_factors)):
                 if num_nodes_alive[i] < self._required_nodes(cl, rf_factors, i):
@@ -411,6 +419,25 @@ class TestAvailability(TestHelper):
 
         self._test_network_topology_strategy(combinations)
 
+    @attr("resource-intensive")
+    @since("3.0")
+    def test_network_topology_strategy_quorum_plus_local_quorum(self):
+        """
+        Write to multiple datacenters using NTS
+        Write with QUORUM_PLUS_LOCAL_QUORUM or QUORUM_PLUS_LOCAL_ONE
+        Read with QUORUM
+        """
+        self.nodes = [3, 3, 3]
+        self.rf = OrderedDict([('dc1', 3), ('dc2', 3), ('dc3', 3)])
+
+        self._start_cluster()
+
+        combinations = [
+            (ConsistencyLevel.QUORUM_PLUS_LOCAL_QUORUM, ConsistencyLevel.QUORUM),
+            (ConsistencyLevel.QUORUM_PLUS_LOCAL_ONE, ConsistencyLevel.QUORUM),
+        ]
+        self._test_network_topology_strategy(combinations)
+
 
 class TestAccuracy(TestHelper):
     """
@@ -646,6 +673,8 @@ class TestAccuracy(TestHelper):
             (ConsistencyLevel.ONE, ConsistencyLevel.TWO),
             (ConsistencyLevel.TWO, ConsistencyLevel.ONE),
             (ConsistencyLevel.QUORUM, ConsistencyLevel.SERIAL, ConsistencyLevel.SERIAL),
+            (ConsistencyLevel.QUORUM_PLUS_LOCAL_ONE, ConsistencyLevel.QUORUM),
+            (ConsistencyLevel.QUORUM_PLUS_LOCAL_QUORUM, ConsistencyLevel.QUORUM),
             (ConsistencyLevel.LOCAL_QUORUM, ConsistencyLevel.LOCAL_SERIAL, ConsistencyLevel.LOCAL_SERIAL),
             (ConsistencyLevel.QUORUM, ConsistencyLevel.LOCAL_SERIAL, ConsistencyLevel.SERIAL),
             (ConsistencyLevel.LOCAL_QUORUM, ConsistencyLevel.SERIAL, ConsistencyLevel.LOCAL_SERIAL),
