@@ -3,7 +3,8 @@ import time
 
 from cassandra import ConsistencyLevel
 
-from dtest import DISABLE_VNODES, Tester, create_ks
+from ccmlib.node import TimeoutError
+from dtest import DISABLE_VNODES, Tester, create_ks, debug
 from tools.data import create_c1c2_table, insert_c1c2, query_c1c2
 from tools.decorators import no_vnodes, since
 
@@ -174,3 +175,74 @@ class TestHintedHandoff(Tester):
         time.sleep(5)
         for x in xrange(0, 100):
             query_c1c2(session, x, ConsistencyLevel.ONE)
+
+    @no_vnodes()
+    def hintedhandoff_delivery_to_decom_test(self):
+        """
+        @jira_ticket CASSANDRA-13308
+
+        Hint delivery in progress during decom can block gossip
+        """
+
+        self.cluster.populate(4, install_byteman=True).start(wait_for_binary_proto=True)
+        [node1, node2, node3, node4] = self.cluster.nodelist()
+        session = self.patient_cql_connection(node1)
+        create_ks(session, 'ks', 2)
+        create_c1c2_table(self, session)
+
+        # Insert data so there's something to decom
+        insert_c1c2(session, n=100, consistency=ConsistencyLevel.QUORUM)
+
+        node4.stop(wait_other_notice=True)
+
+        # Stop hint delivery, because we'll need to get the node started and byteman setup before we start delivering hints
+        for node in node1, node2, node3:
+            node.nodetool("pausehandoff")
+
+        for node in node1, node2, node3:
+            node.byteman_submit(['./byteman/hint_never_complete.btm'])
+
+        insert_c1c2(session, n=1000, consistency=ConsistencyLevel.ONE)
+        # We start the node, and then immediately decommission it as soon as hint delivery starts
+        node4.start(wait_for_binary_proto=True)
+
+        # We can resume hint delivery, which shouldn't complete because of the byteman rules on 1-3
+        for node in node1, node2, node3:
+            node.nodetool("resumehandoff")
+
+        mark1 = node1.mark_log()
+        mark2 = node2.mark_log()
+        mark3 = node3.mark_log()
+        mark4 = node4.mark_log()
+
+        node4.decommission()
+        node1.watch_log_for("Removing tokens", timeout=60, from_mark=mark1)
+        node4.watch_log_for("DECOMMISSIONED", timeout=60, from_mark=mark4)
+
+        # Now make sure gossip isnt blocked, by checking for it in each log
+        try:
+            debug("do we see blocked gossip in node1?")
+            node1.watch_log_for("pending tasks; skipping status check", timeout=10, from_mark=mark1)
+            assert(False)
+        except TimeoutError as e:
+            # Expected, continue
+            pass
+
+        try:
+            debug("do we see blocked gossip in node2?")
+            node2.watch_log_for("pending tasks; skipping status check", timeout=10, from_mark=mark2)
+            assert(False)
+        except TimeoutError as e:
+            # Expected, continue
+            pass
+
+        try:
+            debug("do we see blocked gossip in node3?")
+            node3.watch_log_for("pending tasks; skipping status check", timeout=10, from_mark=mark3)
+            assert(False)
+        except TimeoutError as e:
+            # Expected, continue
+            pass
+
+
+

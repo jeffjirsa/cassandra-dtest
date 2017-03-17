@@ -1,0 +1,11 @@
+#
+# Sleep 600s during hint replay
+#
+RULE hints slow complete
+CLASS org.apache.cassandra.hints.HintsDispatchExecutor$DispatchHintsTask
+METHOD run
+AT ENTRY
+IF TRUE
+DO
+   java.lang.Thread.sleep(600000);
+ENDRULE
