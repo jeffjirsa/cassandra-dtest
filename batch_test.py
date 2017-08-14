@@ -1,6 +1,7 @@
 import sys
 import time
 from unittest import skipIf
+from nose.tools import assert_greater_equal
 
 from cassandra import ConsistencyLevel, Timeout, Unavailable
 from cassandra.query import SimpleStatement
@@ -9,6 +10,8 @@ from dtest import Tester, create_ks, debug
 from tools.assertions import (assert_all, assert_invalid, assert_one,
                               assert_unavailable)
 from tools.decorators import since
+from tools.jmxutils import (JolokiaAgent, make_mbean,
+                            remove_perf_disable_shared_mem)
 
 
 class TestBatch(Tester):
@@ -295,6 +298,15 @@ class TestBatch(Tester):
         self._logged_batch_compatibility_test(0, 1, 'github:apache/cassandra-2.2', 2, 4)
 
     @since('3.0', max_version='3.x')
+    def logged_batchlog_compatibility_1_test(self):
+        """
+        @jira_ticket CASSANDRA-9673, test that logged batches still work with a mixed version cluster.
+
+        Here we have one 3.0/3.x node and two 2.2 nodes and we send the batch request to the 3.0 node.
+        """
+        self._logged_batch_batchlog_compatibility_test(0, 1, 'github:apache/cassandra-2.2', 2, 4)
+
+    @since('3.0', max_version='3.x')
     @skipIf(sys.platform == 'win32', 'Windows production support only on 2.2+')
     def logged_batch_compatibility_2_test(self):
         """
@@ -324,6 +336,15 @@ class TestBatch(Tester):
         self._logged_batch_compatibility_test(2, 2, 'github:apache/cassandra-2.2', 1, 4)
 
     @since('3.0', max_version='3.x')
+    def logged_batchlog_compatibility_4_test(self):
+        """
+        @jira_ticket CASSANDRA-9673, test that logged batches still work with a mixed version cluster.
+
+        Here we have two 3.0/3.x nodes and one 2.2 node and we send the batch request to the 2.2 node.
+        """
+        self._logged_batch_batchlog_compatibility_test(2, 2, 'github:apache/cassandra-2.2', 1, 4)
+
+    @since('3.0', max_version='3.x')
     @skipIf(sys.platform == 'win32', 'Windows production support only on 2.2+')
     def logged_batch_compatibility_5_test(self):
         """
@@ -346,6 +367,42 @@ class TestBatch(Tester):
         res = sorted(rows)
         self.assertEquals([[0, 'Jack', 'Sparrow'], [1, 'Will', 'Turner']], [list(res[0]), list(res[1])])
 
+    def _logged_batch_batchlog_compatibility_test(self, coordinator_idx, current_nodes, previous_version, previous_nodes, protocol_version):
+        script = ['./byteman/fail_after_batchlog_write.btm']
+
+        total_batches_replayed = 0
+        blm = make_mbean('db', type='BatchlogManager')
+        for n in self.cluster.nodelist():
+            remove_perf_disable_shared_mem(n)
+
+        session = self.prepare_mixed(coordinator_idx, current_nodes, previous_version, previous_nodes,
+                                     protocol_version=protocol_version, install_byteman=True)
+        coordinator = self.cluster.nodelist()[coordinator_idx]
+        coordinator.byteman_submit(script)
+        debug("Injected byteman scripts to enable batchlog replay {}".format(coordinator.name))
+
+        query = SimpleStatement("""
+            BEGIN BATCH
+            INSERT INTO users (id, firstname, lastname) VALUES (0, 'Jack', 'Sparrow')
+            INSERT INTO users (id, firstname, lastname) VALUES (1, 'Will', 'Turner')
+            APPLY BATCH
+        """, consistency_level=ConsistencyLevel.ALL)
+        session.execute(query)
+
+        for n in self.cluster.nodelist():
+            with JolokiaAgent(n) as jmx:
+                debug('Forcing batchlog replay for {}'.format(n.name))
+                jmx.execute_method(blm, 'forceBatchlogReplay')
+                batches_replayed = jmx.read_attribute(blm, 'TotalBatchesReplayed') 
+                total_batches_replayed = total_batches_replayed + batches_replayed
+
+        assert_greater_equal(total_batches_replayed, 2)
+
+        for node in self.cluster.nodelist():
+            session = self.patient_exclusive_cql_connection(node, protocol_version=protocol_version)
+            rows = sorted(session.execute('SELECT id, firstname, lastname FROM ks.users'))
+            self.assertEqual([[0, 'Jack', 'Sparrow'], [1, 'Will', 'Turner']], [list(rows[0]), list(rows[1])])
+
     def assert_timedout(self, session, query, cl, acknowledged_by=None,
                         received_responses=None):
         try:
@@ -366,15 +423,24 @@ class TestBatch(Tester):
         else:
             assert False, "Expecting TimedOutException but no exception was raised"
 
-    def prepare(self, nodes=1, compression=True, version=None, protocol_version=None):
+    def prepare(self, nodes=1, compression=True, version=None, protocol_version=None, install_byteman=False):
         if not self.cluster.nodelist():
-            self.cluster.populate(nodes)
+            self.cluster.populate(nodes, install_byteman=install_byteman)
             if version:
                 for node in self.cluster.nodelist():
                     node.set_install_dir(version=version)
                     debug("Set cassandra dir for {} to {}".format(node.name, node.get_install_dir()))
+                    if install_byteman:
+                        remove_perf_disable_shared_mem(node)
+
+            for n in self.cluster.nodelist():
+                remove_perf_disable_shared_mem(n)
 
             self.cluster.start(wait_other_notice=True)
+
+        if install_byteman:
+            for n in self.cluster.nodelist():
+                remove_perf_disable_shared_mem(n)
 
         node1 = self.cluster.nodelist()[0]
         session = self.patient_cql_connection(node1, protocol_version=protocol_version)
@@ -405,24 +471,24 @@ class TestBatch(Tester):
 
         time.sleep(.5)
 
-    def prepare_mixed(self, coordinator_idx, current_nodes, previous_version, previous_nodes, compression=True, protocol_version=None):
+    def prepare_mixed(self, coordinator_idx, current_nodes, previous_version, previous_nodes, compression=True, protocol_version=None, install_byteman=False):
 
         debug("Testing with {} node(s) at version '{}', {} node(s) at current version"
               .format(previous_nodes, previous_version, current_nodes))
 
         # start a cluster using the previous version
-        self.prepare(previous_nodes + current_nodes, compression, previous_version, protocol_version=protocol_version)
+        self.prepare(previous_nodes + current_nodes, compression, previous_version, protocol_version=protocol_version, install_byteman=install_byteman)
 
         # then upgrade the current nodes to the current version but not the previous nodes
         for i in xrange(current_nodes):
             node = self.cluster.nodelist()[i]
-            self.upgrade_node(node)
+            self.upgrade_node(node, install_byteman=install_byteman)
 
         session = self.patient_exclusive_cql_connection(self.cluster.nodelist()[coordinator_idx], protocol_version=protocol_version)
         session.execute('USE ks')
         return session
 
-    def upgrade_node(self, node):
+    def upgrade_node(self, node, install_byteman=False):
         """
         Upgrade a node to the current version
         """
@@ -438,6 +504,8 @@ class TestBatch(Tester):
 
         # Restart nodes on new version
         debug('Starting {} on new version ({})'.format(node.name, node.get_cassandra_version()))
+        if install_byteman:
+            remove_perf_disable_shared_mem(node)
         node.start(wait_other_notice=True, wait_for_binary_proto=True)
         debug('Upgrading sstables')
         node.nodetool('upgradesstables -a')
