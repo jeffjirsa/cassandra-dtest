@@ -3,7 +3,7 @@ import uuid
 from cassandra import ConsistencyLevel, WriteFailure, WriteTimeout
 
 from dtest import Tester, supports_v5_protocol
-from thrift_bindings.v22 import ttypes as thrift_types
+from thrift_bindings.thrift010 import ttypes as thrift_types
 from thrift_tests import get_thrift_client
 from tools.decorators import since
 

@@ -11,8 +11,8 @@ from thrift.transport import TSocket, TTransport
 from tools.assertions import assert_length_equal
 from dtest import (CASSANDRA_VERSION_FROM_BUILD, DISABLE_VNODES, NUM_TOKENS,
                    ReusableClusterTester, debug, init_default_config)
-from thrift_bindings.v22 import Cassandra
-from thrift_bindings.v22.Cassandra import (CfDef, Column, ColumnDef,
+from thrift_bindings.thrift010 import Cassandra
+from thrift_bindings.thrift010.Cassandra import (CfDef, Column, ColumnDef,
                                            ColumnOrSuperColumn, ColumnParent,
                                            ColumnPath, ColumnSlice,
                                            ConsistencyLevel, CounterColumn,

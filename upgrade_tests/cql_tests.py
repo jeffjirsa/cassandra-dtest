@@ -19,9 +19,9 @@ from nose.exc import SkipTest
 from nose.tools import assert_not_in
 
 from dtest import RUN_STATIC_UPGRADE_MATRIX, debug
-from thrift_bindings.v22.ttypes import \
+from thrift_bindings.thrift010.ttypes import \
     ConsistencyLevel as ThriftConsistencyLevel
-from thrift_bindings.v22.ttypes import (CfDef, Column, ColumnDef,
+from thrift_bindings.thrift010.ttypes import (CfDef, Column, ColumnDef,
                                         ColumnOrSuperColumn, ColumnParent,
                                         Deletion, Mutation, SlicePredicate,
                                         SliceRange)
