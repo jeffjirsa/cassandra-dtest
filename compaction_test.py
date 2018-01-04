@@ -1,4 +1,6 @@
 import os
+import glob
+import distutils.dir_util
 import random
 import re
 import string
@@ -553,6 +555,125 @@ class TestCompaction(Tester):
         m = p.search(output)
         self.assertEqual(5 * len(node1.data_directories()), int(m.group(1)))
         self.assertEqual(25 * len(node1.data_directories()), int(m.group(2)))
+
+    @since('3.0', max_version="3.x")
+    def test_upgrade_without_ancestors_21(self):
+        self.upgrade_without_ancestors('github:apache/cassandra-2.1')
+
+    @since('3.0', max_version="3.x")
+    def test_upgrade_without_ancestors_22(self):
+        self.upgrade_without_ancestors('github:apache/cassandra-2.2')
+
+
+    def upgrade_without_ancestors(self, version=None):
+        """
+        In cassandra-3.0, we remove ancestors from metadata and rely on transaction logs.
+        But on the first upgrade, we still need to handle leftovers properly or we can
+        ressurect data
+        
+        @jira_ticket CASSANDRA-13313
+        """
+        ks = "ks"
+        cf = "upgrade_ancestors"
+        cluster = self.cluster
+        self.cluster.set_datadir_count(1)
+
+        if version:
+            self.cluster.set_install_dir(version=version)
+            debug("Set cassandra dir to {}".format(self.cluster.get_install_dir()))
+
+        cluster.populate(1).start(wait_for_binary_proto=True)
+        [node1] = cluster.nodelist()
+        session = self.patient_cql_connection(node1)
+        create_ks(session, ks , 1)
+        if hasattr(self, 'strategy'):
+            strat = self.strategy
+        else:
+            strat = "LeveledCompactionStrategy"
+        session.execute('CREATE TABLE {0} (id int PRIMARY KEY, d TEXT) WITH compaction = {{\'class\':\'{1}\', \'enabled\':\'false\'}};'.format(cf, strat))
+        for i in range(0, 100):
+            session.execute('insert into upgrade_ancestors (id, d) values ({0}, \'{1}\')'.format(i, 'hello' * 100))
+        node1.flush() # Will create generation 1
+        original_sstable_files = self.get_sstables(ks, cf)
+        self.quick_snapshot(node1, ks, cf, cf)
+        for i in range(0, 100):
+            session.execute('insert into upgrade_ancestors (id, d) values ({0}, \'{1}\')'.format(i, 'hello' * 200))
+        node1.flush() # Will create generation 2
+        node1.compact() # Will compact 1 + 2 = 3
+        compacted_sstables = self.get_sstables(ks, cf)
+        node1.stop()
+        self.set_node_to_current_version(node1)
+        debug("Copying compacted sstable back into the data directory")
+        self.copy_snapshot(node1, ks, cf, cf) # Copies compacted ancestor 1 in with 3. 1 should be deleted on startup
+        node1.start(wait_for_binary_proto=True)
+        upgraded_sstables = self.get_sstables(ks, cf)
+        debug("Comparing sstables from before {0} , compacted {1}, after {2}".format(original_sstable_files, compacted_sstables, upgraded_sstables))
+        assert_length_equal(upgraded_sstables, len(compacted_sstables))
+        for f in original_sstable_files:
+            assert f not in upgraded_sstables
+        for f in compacted_sstables:
+            assert f in upgraded_sstables
+
+    def copy_snapshot(self, node, ks, cf, name):
+        debug("Restoring snapshot " + name + " to " + ks + "." + cf + " data directory")
+        for data_dir in node.data_directories():
+            cfdirs = glob.glob("{data_dir}/{ks}/{cf}-*/".format(data_dir=data_dir, ks=ks, cf=cf))
+            snapshot_dirs = glob.glob("{data_dir}/{ks}/{cf}-*/snapshots/{name}".format(data_dir=data_dir, ks=ks, cf=cf, name=name))
+            if len(snapshot_dirs) > 0 and len(cfdirs) > 0: # We have both the cf and snapshot
+                snapshot_dir = snapshot_dirs[0]
+                cfdir = cfdirs[0]
+            else:
+                continue
+            debug("Copying from " + snapshot_dir + " to " + cfdir)
+
+            # Copy files from the snapshot dir to existing temp dir
+            distutils.dir_util.copy_tree( str(snapshot_dir), str(cfdir))
+
+
+    def quick_snapshot(self, node, ks, cf, name):
+        debug("Making snapshot....")
+        node.flush()
+        snapshot_cmd = 'snapshot {ks} -cf {cf} -t {name}'.format(ks=ks, cf=cf, name=name)
+        debug("Running snapshot cmd: {snapshot_cmd}".format(snapshot_cmd=snapshot_cmd))
+        node.nodetool(snapshot_cmd)
+
+
+    def get_sstables(self, ks, table):
+        """
+        Return the sstables for a table and the specified indexes of this table
+        """
+        table_sstables = self.get_sstable_files(self.get_table_paths(ks, table))
+        self.assertGreater(len(table_sstables), 0)
+        return sorted(table_sstables)
+
+    def get_table_paths(self, ks, table):
+        """
+        Return the path where the table sstables are located
+        """
+        node1 = self.cluster.nodelist()[0]
+        paths = []
+        for data_dir in node1.data_directories():
+            basepath = os.path.join(data_dir, ks)
+            for x in os.listdir(basepath):
+                if x.startswith(table):
+                    paths.append(os.path.join(basepath, x))
+                    break
+        return paths
+
+    def get_sstable_files(self, paths):
+        """
+        Return the sstable files at a specific location
+        """
+        ret = []
+        debug('Checking sstables in {}'.format(paths))
+
+        for ext in ('*.db', '*.txt', '*.adler32', '*.sha1'):
+            for path in paths:
+                for fname in glob.glob(os.path.join(path, ext)):
+                    bname = os.path.basename(fname)
+                    ret.append(bname)
+        return ret
+
 
     def skip_if_no_major_compaction(self):
         if self.cluster.version() < '2.2' and self.strategy == 'LeveledCompactionStrategy':
